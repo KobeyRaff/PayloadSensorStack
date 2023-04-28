@@ -452,7 +452,7 @@ void loop()
     AccelArmState = false; // Active now
     Serial.print("Accel Arm Succesful");
     begin_armed();
-    acccelArmActivated = true;
+    accelArmActivated = true;
   }
 
   // Log sensor data to SD card
@@ -535,6 +535,7 @@ void loop()
       {
         pumpRunStartTime = millis(); // Sets start time
         pumpStartSet = true;
+        begin_experiment();
       }
 
       // pumpActiveBool = true;
