@@ -1,651 +1,723 @@
-//#define MIRROR_SD_WRITES_TO_SERIAL
-//#define LOG_IN_BINARY_FORMAT
+#include <Wire.h>
+#include <MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <SPI.h>
+#include <SD.h>
+#include <I2Cdev.h>
 
-#define ARMED_LED_PIN 32
-#define RXD2 16
-#define TXD2 17
-#define BATTERY_VOLTAGE_PIN 35
-#define BATTERY_VOLTAGE_MULT 2
+// ------------------------------------- SENSOR SETUP ------------------------------------------
+
+#define BUZZER_PIN 4
+#define MOTOR_CONTROL_PIN 16
+#define CAMERA_CONTROL_PIN 17
+#define LED_PIN_1 32
+#define LED_PIN_2 33
+#define LED_PIN_3 25
 
 
-#include "I2Cdev.h"
-#include "MPU6050.h"
-#include "QMC5883L.h"
-#include "BME280.h"
-#include "Wire.h"
+Adafruit_BME280 bme;
 
-MPU6050 accelgyro(0x68);
-int16_t ax, ay, az;
-int16_t gx, gy, gz;
+
+const int freq = 1000;      // set the PWM frequency to 1khz
+const int motorChannel = 0;   // set the PWM channel
+const int resolution = 8;   // set PWM resolution
+
+const int buzzerChannel = 8;
+
+// Function predefs
+inline void check_threshold(
+    float bme_temp,
+    float bme_press,
+    float bme_hum);
+
+uint16_t ArmAccel = 2000;  // TODO : UPDATE! Arming acceleration, ideally, speed off the rail (Upon arm allows cameras to start recording, data logging, pump activation logic runs. etc.)
+bool AccelArmState = true; // True = not active, false = active experiment
+uint16_t armState = 0;
+
+// MPU6050
 int accelgyro_init_ok = 0;
+inline void print_MPU6050_data(
+    int16_t ax,
+    int16_t ay,
+    int16_t az,
+    int16_t gx,
+    int16_t gy,
+    int16_t gz);
 
-QMC5883L mag;
-int16_t mx, my, mz, mt;
-int mag_init_ok = 0;
+MPU6050 mpu; // Create mpu6050 object
 
-BME280 bme(0x76);
-float bme_temp;
-float bme_press;
-float bme_hum;
-int bme_init_ok = 0;
+unsigned long pump_millis = 0;
+unsigned long experiment_length_s = 20*1000;
+//This is the code to disable the pumps.
+void IRAM_ATTR onTimer(){
+  ledcWrite(motorChannel, 0);
+  finalise_and_close();
+}
 
-char gps_string[200];
-int gps_string_end_index = 0;
-
-
-#include "FS.h"
-#include "SD.h"
-#include "SPI.h"
-#define SD_CS_PIN 29
+// SD CARD and file logging
+uint8_t SD_CS_PIN = 29;
 #define SD_SAVE_INTERVAL 5000ul // ms
 String log_file_dir = "/";
-String log_file_name = "HPR";
+String log_file_name = "Malyrie_Test";
 int log_file_number = 0;
 String log_file_extension = ".txt";
 int log_file_open = 0;
-File log_file;
+File log_file; // Initialize SD card
 
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiAP.h>
-#include <string.h> // for strtok
-const char* ssid = "Naboo(b)";
-const char* password = "monashHPR";
-WiFiServer server(80);
-
-// ------ predefs -----
 inline String get_log_file_path();
 
 int clear_SD_files();
 
-String parse_get_request(String line);
-void serve_main_page(WiFiClient &client);
-void serve_redirect_to_main_page(WiFiClient &client);
+// ------------------------------------- PUMP ACTIVATION LOGIC FUNCTIONS ------------------------------------------
+// Threshold Value in G
+float THRESHOLD_G = 0.7;
 
-inline void print_state(byte currentState);
+// Hard Coded Activation Values
+int start_time = 30; // Sims say 27 seconds from launch. TODO: Make more tolerant?
+int end_time = 100;  // Sims say 100 seconds from launch
 
-inline void print_MPU6050_data(
-  int16_t ax,
-  int16_t ay,
-  int16_t az,
-  int16_t gx,
-  int16_t gy,
-  int16_t gz
-);
+// exponential smoothing filter for acceleration values from MPU6050
+inline void filter_accel(
+    int16_t ax,
+    int16_t ay,
+    int16_t az,
+    int16_t *axf,
+    int16_t *ayf,
+    int16_t *azf,
+    float filter_alpha)
+{
+  static bool first_call = true;
 
-inline void print_HMC5883L_data(
-  int16_t mx,
-  int16_t my,
-  int16_t mz,
-  int16_t mt
-);
+  if (first_call)
+  {
+    // use unfiltered acceleration values for first call
+    *axf = ax;
+    *ayf = ay;
+    *azf = az;
+    first_call = false;
+  }
+  else
+  {
+    // apply exponential smoothing filter to acceleration values
+    // output = a * current reading + (1 - a) * last reading
+    *axf = filter_alpha * ax + (1 - filter_alpha) * *axf;
+    *ayf = filter_alpha * ay + (1 - filter_alpha) * *ayf;
+    *azf = filter_alpha * az + (1 - filter_alpha) * *azf;
+  }
+}
 
-inline void print_BME280_data(
-  float bme_temp,
-  float bme_press,
-  float bme_hum
-);
+void led_test()
+{
 
-inline void print_GPS_data(
-  char* dat_string
-);
+  digitalWrite(LED_PIN_1, HIGH);
+  delay(500);
+  digitalWrite(LED_PIN_2, HIGH);
+  delay(500);
+  digitalWrite(LED_PIN_1, LOW);
+  delay(500);
+  digitalWrite(LED_PIN_3, HIGH);
+  delay(500);
+  digitalWrite(LED_PIN_2, LOW);
+  delay(500);
+  digitalWrite(LED_PIN_3, LOW);
+}
+void playNote(int frequency, int duration) {
+  ledcWrite(buzzerChannel, 128);
+  ledcWriteTone(buzzerChannel, frequency); // Play the note
+  delay(duration); // Wait for the note to play
+  ledcWrite(buzzerChannel, 0); // Stop the note
+}
 
-typedef enum {
-  AWAITING_ARM_SIGNAL,
-  ARMED
-} State;
+void buzzerTest()
+{
+   const int melody[] = {
+  370, 415, 466, 0, 622, 554	
+  };
 
-int period = 20000; //Time to deploy after acceleration arming
-unsigned long previousMillis = 0; //intial time
+// Note durations (1 = full note, 2 = half note, 4 = quarter note, etc.)
+const int noteDurations[] = {
+  8, 8, 8, 16, 2, 1
+};
 
-uint16_t ArmAccel = 2000; //Arming acceleration, ideally, speed off the rail
+  for (int i = 0; i < sizeof(melody) / sizeof(melody[0]); i++) {
+    int noteDuration = 1000 / noteDurations[i];
+    playNote(melody[i], noteDuration);
 
-int deployPin = 4;//GPIO4
-
-bool AccelArmState = true;
-bool something = true;
-
-void setup() {
-
-  Serial.begin(115200);
-  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
-
-  pinMode(ARMED_LED_PIN, OUTPUT);
-  digitalWrite(ARMED_LED_PIN, LOW);
-
-  pinMode(deployPin, OUTPUT);
-  digitalWrite(deployPin, LOW);
-
-  pinMode(BATTERY_VOLTAGE_PIN, INPUT);
-
-  Wire.begin();
-  
-  accelgyro.initialize();
-  Serial.println("Testing MPU6050 connection...");
-  accelgyro_init_ok = accelgyro.testConnection();
-  Serial.println(accelgyro_init_ok ? "MPU6050 connection successful" : "MPU6050 connection failed");
-  accelgyro.setFullScaleAccelRange(MPU6050_ACCEL_FS_16);
-  accelgyro.setFullScaleGyroRange(MPU6050_GYRO_FS_2000);
-//  MPU6050_self_test(accelgyro);
-  
-  mag.init();
-  mag.setSamplingRate(200);
-  Serial.println("Testing HMC5883L connection...");
-  mag_init_ok = mag.ready();
-  Serial.println(mag_init_ok ? "HMC5883L connection successful" : "HMC5883L connection failed");
-
-  bme.init();
-  Serial.println("Testing BME280 connection...");
-  bme_init_ok = bme.checkConnection();
-  Serial.println(bme_init_ok ? "BME280 connection successful" : "BME280 connection failed");
-
-  pinMode(SD_CS_PIN, OUTPUT);
-  Serial.println("Starting SD card.");
-  if (!SD.begin()) {
-    Serial.println("SD initialization failed!");
-  } else {
-    Serial.println("Will write to " + get_log_file_path());
+    // Add a brief pause between notes
+    delay(noteDuration * 0.3);
   }
 
-  WiFi.softAP(ssid, password);
-  IPAddress myIP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(myIP);
-  server.begin();
-  Serial.println("Server and WiFi started");
 
+
+}
+
+void motor_test()
+{
+  ledcWrite(motorChannel, 200);
   delay(1000);
+  ledcWrite(motorChannel, 0);  
+}
+
+// !IF NEEDED
+// Returns true if signal is stable for specified debounce time: here it is 100ms.
+bool debounce(bool value, bool &last_value, int &debounce_start_time)
+{
+  static unsigned long last_time = 0;
+  static const unsigned long DEBOUNCE_TIME = 100; // milliseconds
+
+  unsigned long current_time = millis(); // get current time in milliseconds
+  unsigned long elapsed_time = current_time - last_time;
+
+  if (value != last_value)
+  {
+    last_value = value;
+    debounce_start_time = current_time;
+    //return false;
+    return last_value;
+  }
+  else if (elapsed_time >= DEBOUNCE_TIME)
+  {
+    last_time = current_time;
+    //return true;
+    return last_value;
+  }
+
+  //return false;
+  return last_value;
+}
+
+// Returns true if magnitude under threshold
+bool check_threshold(double magnitude)
+{
+  static const double THRESHOLD = THRESHOLD_G * 2048; // TODO: move somewhere else?
+  if (magnitude < THRESHOLD)
+    return true;
+  else
+    return false;
+}
+void enter_arming()
+{
+  //Turn on LED 1
+  digitalWrite(LED_PIN_1, HIGH);
+  armState = 0;
+}
+//The payload is now armed, it has detected launch. In order to prevent misdetection due to movement on the pad, we will trigger a buzzer here. 
+//If this buzzer goes off while on the pad, then we need to restart the payload as the experiment will not trigger. 
+//This will enable the camera pin, turn on LED 2 and LED 1, and enter the armed state
+void begin_armed()
+{
+  digitalWrite(LED_PIN_2, HIGH);
+  armState = 1;
+  playNote(440, 500);
+
+}
+
+//The payload has now detected the experimental phase, we now need to begin the experiment.
+//Turn on LED 3, begin pump PWM (can we use an interrupt and timer for this?)
+void begin_experiment()
+{
+  //Enable experiment
+  digitalWrite(LED_PIN_3, HIGH);
+  //Write motor driver PWM
+  ledcWrite(motorChannel, 200);
+  //Begin interrupt to disable the motors.
+  pump_millis = millis();
+  armState = 2;
+}
+//Experiment is now finished, note this in the SD card log, turn off LEDs 1 and 2, disable pump. Cameras will turn off by themselves. Close SD card file
+void finalise_and_close()
+{
+  digitalWrite(LED_PIN_1, LOW);
+  digitalWrite(LED_PIN_2, LOW);
+  armState = 3;
+
 }
 
 
-void loop() {
+#define IDLE_STATE 0
+#define FIRST_ACTIVATION_STATE 1
+#define SECOND_ACTIVATION_STATE 2
+#define SECOND_ACTIVATION_HELD_STATE 3
+#define DONE_STATE 4
+
+// Will ignore the first activation time regardless of the length of activation. Upon exiting activation it will then accept the second activation.
+// Should just return true upon second activation below threshold and will keep returning true until exiting the threshold.
+// Upon this will no longer return true regardless of threshold values.
+
+// TODO: Can update this code so that it just returns true upon each threshold cross. So rather than continously returning true. It returns true once which activates pump. Then upon returning false it deactivates pump.
+// Therfore doesn't continously update pump activation. Activates pump once and then shuts off once. Much more simple!
+bool isSecondActivation(bool isBelowThreshold)
+{
+  static unsigned char state = IDLE_STATE;
+  bool secondActivationDetected = false;
+
+  switch (state)
+  {
+  case IDLE_STATE:
+    if (isBelowThreshold)
+    {
+      state = FIRST_ACTIVATION_STATE;
+    }
+    break;
+
+  case FIRST_ACTIVATION_STATE:
+    if (!isBelowThreshold)
+    {
+      state = SECOND_ACTIVATION_STATE;
+    }
+    break;
+
+  case SECOND_ACTIVATION_STATE:
+    if (isBelowThreshold)
+    {
+      secondActivationDetected = true;
+      state = SECOND_ACTIVATION_HELD_STATE;
+    }
+    break;
+
+  case SECOND_ACTIVATION_HELD_STATE:
+    if (!isBelowThreshold)
+    {
+      state = DONE_STATE;
+    }
+    else
+    {
+      secondActivationDetected = true;
+    }
+    break;
+
+  case DONE_STATE:
+    // do nothing
+    break;
+  }
+
+  return secondActivationDetected;
+}
+
+// ------------------------------- SETUP -------------------------------
+void setup()
+{
+  //Initialize serial for debugging
+  Serial.begin(115200);
+  delay(500);
+  //Begin i2c for BME280 and MPU6050, this is needed because the ESP32 is stupid
+  #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+        Wire.begin();
+        Serial.println("Beginning I2c using wire library");
+  #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
+        Fastwire::setup(400, true);
+        Serial.println("Beginning I2c using fastwire library");
+  #endif
+  Serial.println("Beginning stack initialization");
+  // MPU6050 initialization
+  mpu.initialize();
+  delay(1000);
+  Serial.println("MPU6050 Initialization...");
+  accelgyro_init_ok = mpu.testConnection();
+  //Serial.println(accelgyro_init_ok ? "MPU6050 connection successful" : "MPU6050 connection failed");
+  mpu.setFullScaleAccelRange(3); // MPU6050_ACCEL_FS_16 (meant to be this?)
+  mpu.setFullScaleGyroRange(3);  // MPU6050_GYRO_FS_2000 (as above)
+    
+  // SD Card
+  Serial.println("Starting SD card.");
+  if (!SD.begin())
+  {
+    Serial.println("SD initialization failed!");
+  }
+  else
+  {
+    Serial.println("Will write to " + get_log_file_path());
+  }
+  delay(1000);
+
+  // Initialize PWM controller on motor pins
+  ledcAttachPin(MOTOR_CONTROL_PIN, motorChannel);
+  ledcSetup(motorChannel, freq, resolution);  // define the PWM Setup
+  motor_test();
   
+  // Initialize buzzer PWM controller
+  ledcSetup(buzzerChannel, 2000, 8);
+  ledcAttachPin(BUZZER_PIN, buzzerChannel);
+  buzzerTest();
+
+  if(!accelgyro_init_ok)
+  {
+    while(true)
+    {
+      //If we end up in this code, the gyro has not initialized and we CANNOT arm the payload
+      playNote(1000.00, 1000);
+      delay(1000);
+    }
+  }
+
+  // OPENMV Cameras
+  pinMode(CAMERA_CONTROL_PIN, OUTPUT);   // Set camera control pin as OUTPUT
+  digitalWrite(CAMERA_CONTROL_PIN, LOW); // Set initial state to LOW (not recording)
+  Serial.println("Camera Initialise");
+
+
+  //Initialize LEDs and turn on
+
+  pinMode(LED_PIN_1, OUTPUT);
+  pinMode(LED_PIN_2, OUTPUT);
+  pinMode(LED_PIN_3, OUTPUT);
+  led_test();
+
+  // BME280 initialize
+  bool status = bme.begin(0x76);
+  if (!status) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring, address, sensor ID!");
+  } else {
+    Serial.println("BME280 initialized!");
+    //BME280 is not critical, if it doesn't initialize we can just ignore it.
+  }
+
+  //timerAttachInterrupt(My_timer, &onTimer, true);
+  //timerAlarmWrite(My_timer, experiment_length, true);
+  enter_arming();
+
+}
+//Enter arming: This is the first mode, prior to being launched. When in this mode, LED 1 will be on, cameras are not recording, and it is awaiting launch detection
+//Add a flag to the SD card indicating the current state
+
+// ------------------------------- LOOP -------------------------------
+void loop()
+{
+  // ------------------------------- RUNS IN ALL STATES -------------------------------
+  // Read MPU6050 raw sensor values
+  int16_t ax, ay, az;
+  int16_t gx, gy, gz;
+
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  //print_MPU6050_data(ax, ay, az, gx, gy, gz);
+
+
+  digitalWrite(CAMERA_CONTROL_PIN, HIGH);
+  Serial.println("camera running loop");
+
+  // Convert accelerometer readings to m/s^2
+  // float ax_mps2 = ax * 9.80665 / 16384.0; // Convert accelerometer values to m/s^2
+  // float ay_mps2 = ay * 9.80665 / 16384.0;
+  // float az_mps2 = az * 9.80665 / 16384.0;
+
+  // BME280 Sensor Data
+  float bme_temp = bme.readTemperature(); // Read temperature in Celsius
+  float bme_hum = bme.readHumidity(); // Read humidity in %
+  float bme_press = bme.readPressure() / 100.0F; // Read pressure in hPa
+
+  Serial.print("Temperature: ");
+  Serial.print(bme_temp);
+  Serial.print(" °C, Humidity: ");
+  Serial.print(bme_hum);
+  Serial.print(" %, Pressure: ");
+  Serial.print(bme_press);
+  Serial.println(" hPa");
+  //Serial.println(mpu.getAccelerationY() * 9.80665 / 16384.0);
+
+  // SD Card Logging
+  // TODO: Clean up this code
   static unsigned long last_file_save_timestamp = 0;
-  static byte currentState = AWAITING_ARM_SIGNAL;
-
-
-  // ---------- stuff that runs in all states -------
-
-  // re-open closed file 
+  // re-open closed file
   // (we may have 'saved' it by closing it, or not yet ever opened it)
-  if (!log_file_open) {
+  if (!log_file_open)
+  {
     Serial.println("Trying to open " + get_log_file_path() + " in append mode.");
     log_file = SD.open(get_log_file_path(), FILE_APPEND);
     log_file_open = log_file != false;
-    if (!log_file_open) {
+    if (!log_file_open)
+    {
       Serial.println("Trying to open " + get_log_file_path() + " as a new file in write mode.");
       log_file = SD.open(get_log_file_path(), FILE_WRITE);
       log_file_open = log_file != false;
     }
-    if (!log_file_open) {
+    if (!log_file_open)
+    {
       Serial.println("Could not open " + get_log_file_path() + " for writing!");
-    } else {
+    }
+    else
+    {
       Serial.println("Opened " + get_log_file_path() + " for writing!");
     }
   }
 
   // do a 'save' by closing, or flushing
-  if (log_file_open && (millis() - last_file_save_timestamp > SD_SAVE_INTERVAL)) {
+  if (log_file_open && (millis() - last_file_save_timestamp > SD_SAVE_INTERVAL))
+  {
     log_file.flush();
-    //log_file.close();
-    //log_file_open = 0;
+    // log_file.close();
+    // log_file_open = 0;
     Serial.println("Closed/saved " + get_log_file_path());
     last_file_save_timestamp = millis();
-    //log_file_number++;
+    // log_file_number++;
   }
 
-  // --------- state transition checks -----------
-  
-  if (currentState == AWAITING_ARM_SIGNAL) {
-
-    int armed = 0;
-
-    WiFiClient client = server.available();   // listen for incoming clients
-  
-    if (client) {                             // if you get a client,
-      Serial.println("New Client.");           // print a message out the serial port
-      String currentLine = "";                // make a String to hold incoming data from the client
-      while (client.connected()) {            // loop while the client's connected
-        if (client.available()) {             // if there's bytes to read from the client,
-          char c = client.read();             // read a byte, then
-          Serial.write(c);                    // print it out the serial monitor
-          if (c == '\n') {                    // if the byte is a newline character
-
-            String url = parse_get_request(currentLine);
-            // if the current line is blank, you got two newline characters in a row.
-            // that's the end of the client HTTP request, so send a response:
-            Serial.println("requested url is: " + url);
-            if (url.equals("/") || url.equals("")) {
-
-              Serial.println("serving main page");
-              serve_main_page(client);
-              break;
-              
-            } else if (url.equals("/H")) {
-
-              Serial.println("arming, redirect");
-              armed = 1;               // GET /H turns the LED on
-              serve_redirect_to_main_page(client);
-              break;
-              
-            } else if (url.equals("/L")) {
-
-              Serial.println("clearing SD file, redirect");
-              if (log_file_open) {
-                log_file.close();
-                log_file_open = 0;
-              }
-              if (SD.remove(get_log_file_path())) {
-                  Serial.println("\nLog file[s] deleted");
-              } else {
-                  Serial.println("\nLog file delete failed");
-              }
-              serve_redirect_to_main_page(client);
-              break;
-              
-            } else {
-              // TODO: serve 404
-              Serial.println("url not found");
-            }
-
-            currentLine = "";
-            
-          } else if (c != '\r') {  // if you got anything else but a carriage return character,
-            currentLine += c;      // add it to the end of the currentLine
-          }
-
-        }
-      }
-      // close the connection:
-      client.stop();
-      Serial.println("Client Disconnected.");
-    }
-    
-    if (armed) {
-      
-      currentState = ARMED;
-      
-      server.close();
-      WiFi.mode(WIFI_MODE_NULL);
-      print_state(currentState);
-      
-    }
-    
-  } else if (currentState == ARMED) {
+  // Off the Rod Arming
+  // If average accel is greater than arm accel. Arm and start logging stuff:
+  int16_t avg = ((ax + ay + az)) / 3; //=(((ax^2+ay^2+az^2)^(1/2))/16)/3
+  if (avg > ArmAccel)
+  {
+    AccelArmState = false; // Active now
+    Serial.print("Accel Arm Succesful");
+    begin_armed();
     
   }
 
+  // Log sensor data to SD card
+  print_MPU6050_data(ax/2048, ay/2048, az/2048, gx, gy, gz);
+  print_BME280_data(bme_temp, bme_press, bme_hum);
+  //log current arming state
+  log_file.println(armState);
 
-  // -------- do the actual stuff expected in each state ----------
-  if (currentState == AWAITING_ARM_SIGNAL) {
-    
-    
-  } else if (currentState == ARMED) {
+  // ------------------------------- ACTIVE FLIGHT PERIOD (CAMERA + ACTIVATiON LOGIC) -------------------------------
+  if (AccelArmState == false)
+  { // Experiment ready to be active
+    static bool activeStartTimeSet = false;
+    static unsigned long activeStartTime;
 
-      // just log stuff
-      accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    if (!activeStartTimeSet)
+    {
+      activeStartTime = millis(); // set active start time on the first iteration
+      activeStartTimeSet = true;  // set flag to true to prevent setting it again
+    }
 
-      int16_t avg = ((ax + ay + az))/3; //=(((ax^2+ay^2+az^2)^(1/2))/16)/3
+    unsigned long currentMillis = millis(); // grab current time
 
-      if (avg > ArmAccel){
+    // Probably can do whatever you need to do here. This is the active state AFAIK.
 
-        AccelArmState = false;
-        Serial.print("Accelero Arm Succesful");
-        digitalWrite(ARMED_LED_PIN, HIGH);
-        
-        }
+    // Start Camera Recording
+    digitalWrite(CAMERA_CONTROL_PIN, HIGH); // TODO: Update camera code as RN it's just ~ 30 seconds recording or something.
+    Serial.println("Camera Started Recording");
 
-      
-      if(AccelArmState == false){
+    // PUMP ACTIVATION LOGIC
+    static int16_t axf, ayf, azf; // filtered acceleration values
+    float filter_alpha = 0.2;     // amount of smoothing applied by filter
+    filter_accel(ax, ay, az, &axf, &ayf, &azf, filter_alpha);
 
-        unsigned long currentMillis = millis(); // grab current time
- 
-         while ((unsigned long)(currentMillis - previousMillis) >= period) {
-           // save the "current" time
-          
-           if(something == false){
-            
-           digitalWrite(deployPin, HIGH);
-           Serial.println("DEPLOYED!");
-           delay(5000);
-           
-           }
+    // calculate magnitude value of acceleration
+    int16_t magnitude = sqrt(axf * axf + ayf * ayf + azf * azf);
 
-           something = false;
-          
-           previousMillis = millis();
-         }  
-    
+    // Check magnitude against threshold
+    bool pump_active_input = check_threshold(magnitude);
+
+    // Debounce input value
+    static bool last_value = false;
+    static int debounce_start_time = 0;
+    bool debounced_value = debounce(pump_active_input, last_value, debounce_start_time);
+
+    // Pump Running start time
+    static bool pumpStartSet = false;
+    static int16_t pumpRunStartTime;
+
+    static bool pumpActivated = false;
+
+    // Handle debounced value
+    if (isSecondActivation(debounced_value))
+    {
+      // TODO: Clean this up.
+      if (!pumpStartSet)
+      {
+        pumpRunStartTime = millis(); // Sets start time
+        pumpStartSet = true;
+        begin_experiment();
+        // TODO: Maybe update from millis() as using millis() for all time features is probably not great practice?
       }
 
-      print_MPU6050_data(ax, ay, az, gx, gy, gz);
+      // ACTIVATE PUMP FOR REAL!
 
-      mag.readRaw(&mx, &my, &mz, &mt);
-      print_HMC5883L_data(mx, my, mz, mt);
+      pumpActivated = true; // Set the pumpActivated flag. This is for the backup pump logic.
 
-      bme.getValues(&bme_temp, &bme_press, &bme_hum);
-      print_BME280_data(bme_temp, bme_press, bme_hum);
+      // TODO: ADD MOTOR CONTROL FUNCTION CALL HERE.
+      // Maybe just set variable to true. Then at bottom below backup logic depending on variable value can call pump activation function. Therefore avoids some issues with the backup logic.
 
-      while (Serial2.available()) {
+      // TODO: Do we want to block it from shutting off from here after <x seconds? I.e. if returns false after 20seconds do we ovveride here or in backup?
+    }
 
-        char c = char(Serial2.read());
-        //Serial.print(c);
+    // ----------- BACKUP PUMP ACTIVATION LOGIC --------------
+    // TODO: Update as currently this will mess with above logic and may switch values very quickly?
+    // If pump hasn't activated by start_time, activate it regardless of acceleration threshold
+    if (currentMillis - activeStartTime >= start_time * 1000 && !pumpActivated)
+    {
+      Serial.println("Backup Pump Activation Activated");
+      if (!pumpStartSet)
+      {
+        pumpRunStartTime = millis(); // Sets start time
+        pumpStartSet = true;
+      }
 
-        if (c == '\n') {
+      // pumpActiveBool = true;
+    }
 
-          gps_string[gps_string_end_index - 1] = '\0';
-          
-          // check if we should save what was captured
-          if (1) { //strncmp(gps_string, "$GPRMC", 6) == 0) {
+    // Activate the pump if the flag is set
+    // If its past the start time and the pump hasn't been activated before. Backup time!
+    // if (activatePump && !pumpActivated) {
+    //   // Two ways to do this. 1) Activate seperate function once that runs it for ~30 seconds and then shuts off. 2) Checks each time.
+    //   // activatePump = false;               // reset the flag
+    //   // pumpActivated = true;               // set the pumpActivated flag
 
-            print_GPS_data(gps_string);
-            
-          }
+    //   // Second Method:
+    //   Serial.println("Activating Pump from backup");
+    //   if (!pumpStartSet) {
+    //     pumpRunStartTime = millis();  // Sets start time
+    //     pumpStartSet = true;
+    //     // TODO: Maybe update from millis() as using millis() for all time features is probably not great practice?
+    //   }
 
-          // clear up
-          gps_string_end_index = 0;
-          
-        } else {
-          
-          gps_string[gps_string_end_index++] = c;
-        
-        }
-        
-     }
-      
+    // TODO: ADD MOTOR CONTROL FUNCTION CALL HERE.
+    // OR pumpActiveBool = true;
+    //TODO: Add pump shutdown based on the new code
+    // pump_millis = 0;
+    //unsigned long experiment_length_s = 20*1000;
+    if ((millis() - pump_millis < experiment_length_s) && armState == 2) {
+    // Your code here, it will run until the specified time has passed
+    ledcWrite(motorChannel, 200);
+    } 
+    else if(armState == 2)
+    {
+      ledcWrite(motorChannel, 0);
+      finalise_and_close();
+    }
+    // Stop activation if elapsed time since armed accel is greater than end time.
+    if (pumpStartSet && currentMillis - activeStartTime >= end_time * 1000)
+    {
+      Serial.println("Stopping backup pump activation");
+      // pumpActiveBool = false;
+    }
+
+    // SECONDARY METHOD:
+    // if (pumpActiveBool) {
+    // activate pump here not above. This will work better with backup logic
+    //}
   }
-  
 }
 
-inline void print_state(byte currentState) {
-  
-  uint32_t timestamp = millis();
-  
-#ifdef LOG_IN_BINARY_FORMAT
-
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-
-  Serial.print("\r\nS");
-  Serial.write( (byte*) &timestamp, sizeof(uint32_t) );
-  Serial.write( (byte*) &currentState, sizeof(byte) );
-
-  #endif
-
-  log_file.print("\r\nS");
-  log_file.write( (byte*) &timestamp, sizeof(uint32_t) );
-  log_file.write( (byte*) &currentState, sizeof(byte) );  
-  
-#else
-    
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-  
-    Serial.print(timestamp); 
-    Serial.print(", new state entered, ");
-    Serial.println(currentState, DEC);
-    
-  #endif
-
-    log_file.print(timestamp); 
-    log_file.print(", new state entered, ");
-    log_file.println(currentState, DEC);
-    
-#endif
-  
-}
-
-
-inline void print_MPU6050_data(
-  int16_t ax,
-  int16_t ay,
-  int16_t az,
-  int16_t gx,
-  int16_t gy,
-  int16_t gz
-) {
-  
-  uint32_t timestamp = millis();
-  
-#ifdef LOG_IN_BINARY_FORMAT
-
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-
-  Serial.print("\r\nAG");
-  Serial.write( (byte*) &timestamp, sizeof(uint32_t) );
-  Serial.write( (byte*) &ax, sizeof(int16_t) );
-  Serial.write( (byte*) &ay, sizeof(int16_t) );
-  Serial.write( (byte*) &az, sizeof(int16_t) );
-  Serial.write( (byte*) &gx, sizeof(int16_t) );
-  Serial.write( (byte*) &gy, sizeof(int16_t) );
-  Serial.write( (byte*) &gz, sizeof(int16_t) );
-
-  #endif
-
-  log_file.print("\r\nAG");
-  log_file.write( (byte*) &timestamp, sizeof(uint32_t) );
-  log_file.write( (byte*) &ax, sizeof(int16_t) );
-  log_file.write( (byte*) &ay, sizeof(int16_t) );
-  log_file.write( (byte*) &az, sizeof(int16_t) );
-  log_file.write( (byte*) &gx, sizeof(int16_t) );
-  log_file.write( (byte*) &gy, sizeof(int16_t) );
-  log_file.write( (byte*) &gz, sizeof(int16_t) );  
-  
-#else
-    
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-  
-    Serial.print(timestamp);
-    Serial.print(", a/g, ");
-    Serial.print(ax); Serial.print(", ");
-    Serial.print(ay); Serial.print(", ");
-    Serial.print(az); Serial.print(", ");
-    Serial.print(gx); Serial.print(", ");
-    Serial.print(gy); Serial.print(", ");
-    Serial.println(gz);
-    
-  #endif
-
-    log_file.print(timestamp); 
-    log_file.print(", a/g, ");
-    log_file.print(ax); log_file.print(", ");
-    log_file.print(ay); log_file.print(", ");
-    log_file.print(az); log_file.print(", ");
-    log_file.print(gx); log_file.print(", ");
-    log_file.print(gy); log_file.print(", ");
-    log_file.println(gz);
-    
-#endif
-
-}
-
-inline void print_HMC5883L_data(
-  int16_t mx,
-  int16_t my,
-  int16_t mz,
-  int16_t mt
-) {
-  
-  uint32_t timestamp = millis();
-  
-#ifdef LOG_IN_BINARY_FORMAT
-
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-
-  Serial.print("\r\nM");
-  Serial.write( (byte*) &timestamp, sizeof(uint32_t) );
-  Serial.write( (byte*) &mx, sizeof(int16_t) );
-  Serial.write( (byte*) &my, sizeof(int16_t) );
-  Serial.write( (byte*) &mz, sizeof(int16_t) );
-  Serial.write( (byte*) &mt, sizeof(int16_t) );
-
-  #endif
-
-  log_file.print("\r\nM");
-  log_file.write( (byte*) &timestamp, sizeof(uint32_t) );
-  log_file.write( (byte*) &mx, sizeof(int16_t) );
-  log_file.write( (byte*) &my, sizeof(int16_t) );
-  log_file.write( (byte*) &mz, sizeof(int16_t) );
-  log_file.write( (byte*) &mt, sizeof(int16_t) );
-  
-#else
-    
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-  
-    Serial.print(timestamp);
-    Serial.print(", m, ");
-    Serial.print(mx); Serial.print(", ");
-    Serial.print(my); Serial.print(", ");
-    Serial.print(mz); Serial.print(", ");
-    Serial.println(mt);
-    
-  #endif
-
-    log_file.print(timestamp); 
-    log_file.print(", m, ");
-    log_file.print(mx); log_file.print(", ");
-    log_file.print(my); log_file.print(", ");
-    log_file.print(mz); log_file.print(", ");
-    log_file.println(mt);
-    
-#endif
-
-}
-
-inline void print_BME280_data(
-  float bme_temp,
-  float bme_press,
-  float bme_hum
-) {
-  
-  uint32_t timestamp = millis();
-  
-#ifdef LOG_IN_BINARY_FORMAT
-
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-
-  Serial.print("\r\nBME");
-  Serial.write( (byte*) &timestamp, sizeof(uint32_t) );
-  Serial.write( (byte*) &bme_temp, sizeof(float) );
-  Serial.write( (byte*) &bme_press, sizeof(float) );
-  Serial.write( (byte*) &bme_hum, sizeof(float) );
-
-  #endif
-
-  log_file.print("\r\nBME");
-  log_file.write( (byte*) &timestamp, sizeof(uint32_t) );
-  log_file.write( (byte*) &bme_temp, sizeof(float) );
-  log_file.write( (byte*) &bme_press, sizeof(float) );
-  log_file.write( (byte*) &bme_hum, sizeof(float) ); 
-  
-#else
-    
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-  
-    Serial.print(timestamp);
-    Serial.print(", tph, ");
-    Serial.print(bme_temp, 3); Serial.print(", ");
-    Serial.print(bme_press, 3); Serial.print(", ");
-    Serial.println(bme_hum, 3);
-    
-  #endif
-
-    log_file.print(timestamp); 
-    log_file.print(", tph, ");
-    log_file.print(bme_temp, 3); log_file.print(", ");
-    log_file.print(bme_press, 3); log_file.print(", ");
-    log_file.println(bme_hum, 3);
-    
-#endif
-
-}
-
-inline void print_GPS_data(
-  char* dat_string
-) {
-  
-  uint32_t timestamp = millis();
-  
-#ifdef LOG_IN_BINARY_FORMAT
-
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-
-  Serial.print("\r\nGPS");
-  Serial.write( (byte*) &timestamp, sizeof(uint32_t) );
-  Serial.print(dat_string);
-
-  #endif
-
-  log_file.print("\r\nGPS");
-  log_file.write( (byte*) &timestamp, sizeof(uint32_t) );
-  log_file.print(dat_string); 
-  
-#else
-    
-  #ifdef MIRROR_SD_WRITES_TO_SERIAL
-  
-    Serial.print(timestamp);
-    Serial.print(", GPS, ");
-    Serial.println(dat_string);
-    
-  #endif
-
-    log_file.print(timestamp);
-    log_file.print(", GPS, ");
-    log_file.println(dat_string);
-    
-#endif
-
-}
-
-int MPU6050_self_test(MPU6050 *mpu) {
-  return 0;
-}
-
-inline String get_log_file_path() {
+// ------------------------------- FUNCTIONS -------------------------------
+inline String get_log_file_path()
+{
   return log_file_dir + log_file_name + String(log_file_number) + log_file_extension;
 }
 
-String parse_get_request(String line) {
-  char* target = "GET";
+// TODO: Clean up both these logging functions.
+// MPU6050 Log data to SD
+inline void print_MPU6050_data(
+    int16_t ax,
+    int16_t ay,
+    int16_t az,
+    int16_t gx,
+    int16_t gy,
+    int16_t gz)
+{
 
-  char s[200];
-  strncpy(s, line.c_str(), sizeof(s)); 
-  char delimeters[7] = " \t\r\n\v\f";
-  char* token = strtok(s, delimeters);
-  int take_next_token = 0;
-  while (token != NULL) {
-    if (take_next_token) {
-      return String(token);
-    }
-    if (strcmp(token, target)==0) take_next_token = 1;
-    token = strtok(NULL, delimeters);
-  }
+  uint32_t timestamp = millis();
 
-  return "";
+#ifdef LOG_IN_BINARY_FORMAT
+
+#ifdef MIRROR_SD_WRITES_TO_SERIAL
+
+  Serial.print("\r\nAG");
+  Serial.write((byte *)&timestamp, sizeof(uint32_t));
+  Serial.write((byte *)&ax, sizeof(int16_t));
+  Serial.write((byte *)&ay, sizeof(int16_t));
+  Serial.write((byte *)&az, sizeof(int16_t));
+  Serial.write((byte *)&gx, sizeof(int16_t));
+  Serial.write((byte *)&gy, sizeof(int16_t));
+  Serial.write((byte *)&gz, sizeof(int16_t));
+
+#endif
+
+  log_file.print("\r\nAG");
+  log_file.write((byte *)&timestamp, sizeof(uint32_t));
+  log_file.write((byte *)&ax, sizeof(int16_t));
+  log_file.write((byte *)&ay, sizeof(int16_t));
+  log_file.write((byte *)&az, sizeof(int16_t));
+  log_file.write((byte *)&gx, sizeof(int16_t));
+  log_file.write((byte *)&gy, sizeof(int16_t));
+  log_file.write((byte *)&gz, sizeof(int16_t));
+
+#else
+
+#ifdef MIRROR_SD_WRITES_TO_SERIAL
+
+  Serial.print(timestamp);
+  Serial.print(", a/g, ");
+  Serial.print(ax);
+  Serial.print(", ");
+  Serial.print(ay);
+  Serial.print(", ");
+  Serial.print(az);
+  Serial.print(", ");
+  Serial.print(gx);
+  Serial.print(", ");
+  Serial.print(gy);
+  Serial.print(", ");
+  Serial.println(gz);
+#endif
+
+  log_file.print(timestamp);
+  log_file.print(", a/g, ");
+  log_file.print(ax);
+  log_file.print(", ");
+  log_file.print(ay);
+  log_file.print(", ");
+  log_file.print(az);
+  log_file.print(", ");
+  log_file.print(gx);
+  log_file.print(", ");
+  log_file.print(gy);
+  log_file.print(", ");
+  log_file.println(gz);
+
+#endif
 }
 
-void serve_main_page(WiFiClient &client) {
-  // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-  // and a content-type so the client knows what's coming, then a blank line:
-  client.println("HTTP/1.1 200 OK");
-  client.println("Content-type:text/html");
-  client.println();
-  
-  // the content of the HTTP response follows the header:
-  int batteryVoltagemV = (analogRead(BATTERY_VOLTAGE_PIN)*BATTERY_VOLTAGE_MULT*3620) / 4096;
-  client.print("Battery level: "); client.print(batteryVoltagemV); client.print(" mV<br>");
-  client.print("Click <a href=\"/H\">here</a> to start logging.<br>");
-  client.printf("accel/gyro: %d, mag: %d, bme: %d, log_file: %d<br>", accelgyro_init_ok, mag_init_ok, bme_init_ok, log_file_open);
-  client.print("Click <a href=\"/L\">here</a> to clear the log file on the SD card.<br>");
-  
-  // The HTTP response ends with another blank line:
-  client.println();
-}
+// BME280 Log data to SD
+inline void print_BME280_data(
+    float bme_temp,
+    float bme_press,
+    float bme_hum)
+{
 
-void serve_redirect_to_main_page(WiFiClient &client) {
-  client.println("HTTP/1.1 307 Redirect");
-  client.println("Location: /");
-  client.println("Content-type:text/html");
-  client.println("Connection:close");
-  client.println("<html>Refreshing...</html>");
-  client.println();
+  uint32_t timestamp = millis();
+
+#ifdef LOG_IN_BINARY_FORMAT
+
+#ifdef MIRROR_SD_WRITES_TO_SERIAL
+
+  Serial.print("\r\nBME");
+  Serial.write((byte *)&timestamp, sizeof(uint32_t));
+  Serial.write((byte *)&bme_temp, sizeof(float));
+  Serial.write((byte *)&bme_press, sizeof(float));
+  Serial.write((byte *)&bme_hum, sizeof(float));
+
+#endif
+
+  log_file.print("\r\nBME");
+  log_file.write((byte *)&timestamp, sizeof(uint32_t));
+  log_file.write((byte *)&bme_temp, sizeof(float));
+  log_file.write((byte *)&bme_press, sizeof(float));
+  log_file.write((byte *)&bme_hum, sizeof(float));
+
+#else
+
+#ifdef MIRROR_SD_WRITES_TO_SERIAL
+
+  Serial.print(timestamp);
+  Serial.print(", tph, ");
+  Serial.print(bme_temp, 3);
+  Serial.print(", ");
+  Serial.print(bme_press, 3);
+  Serial.print(", ");
+  Serial.println(bme_hum, 3);
+
+#endif
+
+  log_file.print(timestamp);
+  log_file.print(", tph, ");
+  log_file.print(bme_temp, 3);
+  log_file.print(", ");
+  log_file.print(bme_press, 3);
+  log_file.print(", ");
+  log_file.println(bme_hum, 3);
+
+#endif
 }
