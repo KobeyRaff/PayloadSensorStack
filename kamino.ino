@@ -34,6 +34,7 @@ inline void check_threshold(
 uint16_t ArmAccel = 2000;  // TODO : UPDATE! Arming acceleration, ideally, speed off the rail (Upon arm allows cameras to start recording, data logging, pump activation logic runs. etc.)
 bool AccelArmState = true; // True = not active, false = active experiment
 uint16_t armState = 0;
+bool accelArmActivated = false;   // Set acceleration armed to inactive. This is the arming state of the pump activation cycle.
 
 // MPU6050
 int accelgyro_init_ok = 0;
@@ -82,9 +83,9 @@ inline void filter_accel(
     int16_t ax,
     int16_t ay,
     int16_t az,
-    int16_t *axf,
-    int16_t *ayf,
-    int16_t *azf,
+    float *axf,
+    float *ayf,
+    float *azf,
     float filter_alpha)
 {
   static bool first_call = true;
@@ -161,34 +162,27 @@ void motor_test()
 
 // !IF NEEDED
 // Returns true if signal is stable for specified debounce time: here it is 100ms.
-bool debounce(bool value, bool &last_value, int &debounce_start_time)
-{
-  static unsigned long last_time = 0;
+bool debounce(bool value, bool& last_value, unsigned long& stable_time) {
   static const unsigned long DEBOUNCE_TIME = 100; // milliseconds
-
-  unsigned long current_time = millis(); // get current time in milliseconds
-  unsigned long elapsed_time = current_time - last_time;
-
-  if (value != last_value)
-  {
+  unsigned long current_time = millis();
+  
+  if (value != last_value) {
     last_value = value;
-    debounce_start_time = current_time;
-    //return false;
-    return last_value;
+    stable_time = current_time + DEBOUNCE_TIME; // set time when stable value is expected
   }
-  else if (elapsed_time >= DEBOUNCE_TIME)
-  {
-    last_time = current_time;
-    //return true;
-    return last_value;
+  
+  if (current_time >= stable_time && last_value != value) {
+    last_value = value;
+    stable_time = current_time + DEBOUNCE_TIME; // set new stable time
   }
-
-  //return false;
+  
   return last_value;
 }
 
+
+
 // Returns true if magnitude under threshold
-bool check_threshold(double magnitude)
+bool check_threshold(float magnitude)
 {
   static const double THRESHOLD = THRESHOLD_G * 2048; // TODO: move somewhere else?
   if (magnitude < THRESHOLD)
@@ -392,10 +386,6 @@ void loop()
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
   //print_MPU6050_data(ax, ay, az, gx, gy, gz);
 
-
-  digitalWrite(CAMERA_CONTROL_PIN, HIGH);
-  Serial.println("camera running loop");
-
   // Convert accelerometer readings to m/s^2
   // float ax_mps2 = ax * 9.80665 / 16384.0; // Convert accelerometer values to m/s^2
   // float ay_mps2 = ay * 9.80665 / 16384.0;
@@ -454,13 +444,14 @@ void loop()
 
   // Off the Rod Arming
   // If average accel is greater than arm accel. Arm and start logging stuff:
+
   int16_t avg = ((ax + ay + az)) / 3; //=(((ax^2+ay^2+az^2)^(1/2))/16)/3
-  if (avg > ArmAccel)
+  if (avg > ArmAccel && !accelArmActivated) // If hasn't been armed before i.e. not launched off rod. 
   {
     AccelArmState = false; // Active now
     Serial.print("Accel Arm Succesful");
     begin_armed();
-    
+    acccelArmActivated = true;
   }
 
   // Log sensor data to SD card
@@ -490,24 +481,24 @@ void loop()
     Serial.println("Camera Started Recording");
 
     // PUMP ACTIVATION LOGIC
-    static int16_t axf, ayf, azf; // filtered acceleration values
+    static float axf, ayf, azf; // filtered acceleration values
     float filter_alpha = 0.2;     // amount of smoothing applied by filter
     filter_accel(ax, ay, az, &axf, &ayf, &azf, filter_alpha);
 
     // calculate magnitude value of acceleration
-    int16_t magnitude = sqrt(axf * axf + ayf * ayf + azf * azf);
+    float magnitude = sqrt(axf * axf + ayf * ayf + azf * azf);
 
     // Check magnitude against threshold
     bool pump_active_input = check_threshold(magnitude);
 
     // Debounce input value
     static bool last_value = false;
-    static int debounce_start_time = 0;
+    static unsigned long debounce_start_time = 0;
     bool debounced_value = debounce(pump_active_input, last_value, debounce_start_time);
 
     // Pump Running start time
     static bool pumpStartSet = false;
-    static int16_t pumpRunStartTime;
+    static unsigned long pumpRunStartTime;
 
     static bool pumpActivated = false;
 
