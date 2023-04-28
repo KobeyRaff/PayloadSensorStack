@@ -160,22 +160,23 @@ void motor_test()
   ledcWrite(motorChannel, 0);  
 }
 
-// !IF NEEDED
-// Returns true if signal is stable for specified debounce time: here it is 100ms.
+// Returns new value if signal is stable for specified debounce time: here it is 100ms.
 bool debounce(bool value, bool& last_value, unsigned long& stable_time) {
-  static const unsigned long DEBOUNCE_TIME = 100; // milliseconds
-  unsigned long current_time = millis();
-  
+  static const unsigned long DEBOUNCE_TIME = 100; // ms
+
+  // Check if the value has changed
   if (value != last_value) {
-    last_value = value;
-    stable_time = current_time + DEBOUNCE_TIME; // set time when stable value is expected
+    // If the value has changed, reset the stable_since time
+    stable_time = millis();
+  } else if (millis() - stable_time >= DEBOUNCE_TIME) {
+    // If the value has been stable for 100ms, return the new value
+    if (value != last_value) {
+      last_value = value;
+      return value;
+    }
   }
-  
-  if (current_time >= stable_time && last_value != value) {
-    last_value = value;
-    stable_time = current_time + DEBOUNCE_TIME; // set new stable time
-  }
-  
+
+  // If the value hasn't been stable for 100ms, return the old value
   return last_value;
 }
 
