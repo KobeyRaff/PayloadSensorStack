@@ -39,12 +39,12 @@ bool accelArmActivated = false;   // Set acceleration armed to inactive. This is
 // MPU6050
 int accelgyro_init_ok = 0;
 inline void print_MPU6050_data(
-    int16_t ax,
-    int16_t ay,
-    int16_t az,
-    int16_t gx,
-    int16_t gy,
-    int16_t gz);
+    float ax,
+    float ay,
+    float az,
+    float gx,
+    float gy,
+    float gz);
 
 MPU6050 mpu; // Create mpu6050 object
 
@@ -604,12 +604,12 @@ inline String get_log_file_path()
 // TODO: Clean up both these logging functions.
 // MPU6050 Log data to SD
 inline void print_MPU6050_data(
-    int16_t ax,
-    int16_t ay,
-    int16_t az,
-    int16_t gx,
-    int16_t gy,
-    int16_t gz)
+    float ax,
+    float ay,
+    float az,
+    float gx,
+    float gy,
+    float gz)
 {
 
   uint32_t timestamp = millis();
