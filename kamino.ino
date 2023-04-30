@@ -449,13 +449,13 @@ void loop()
     unsigned long currentMillis = millis();
     if (currentMillis - previousMillis >= logInterval) {
       // Log at slower rate
-      print_MPU6050_data(ax/2048, ay/2048, az/2048, gx, gy, gz);
+      print_MPU6050_data((float)ax/2048, (float)ay/2048, (float)az/2048, (float)gx, (float)gy, (float)gz);
       print_BME280_data(bme_temp, bme_press, bme_hum);
       previousMillis = currentMillis;
     }
   } else { // Launched
     // Log every time
-    print_MPU6050_data(ax/2048, ay/2048, az/2048, gx, gy, gz);
+    print_MPU6050_data((float)ax/2048, (float)ay/2048, (float)az/2048, (float)gx, (float)gy, (float)gz);
     print_BME280_data(bme_temp, bme_press, bme_hum);
   }
 
@@ -620,23 +620,23 @@ inline void print_MPU6050_data(
 
   Serial.print("\r\nAG");
   Serial.write((byte *)&timestamp, sizeof(uint32_t));
-  Serial.write((byte *)&ax, sizeof(int16_t));
-  Serial.write((byte *)&ay, sizeof(int16_t));
-  Serial.write((byte *)&az, sizeof(int16_t));
-  Serial.write((byte *)&gx, sizeof(int16_t));
-  Serial.write((byte *)&gy, sizeof(int16_t));
-  Serial.write((byte *)&gz, sizeof(int16_t));
+  Serial.write((byte *)&ax, sizeof(float));
+  Serial.write((byte *)&ay, sizeof(float));
+  Serial.write((byte *)&az, sizeof(float));
+  Serial.write((byte *)&gx, sizeof(float));
+  Serial.write((byte *)&gy, sizeof(float));
+  Serial.write((byte *)&gz, sizeof(float));
 
 #endif
 
   log_file.print("\r\nAG");
   log_file.write((byte *)&timestamp, sizeof(uint32_t));
-  log_file.write((byte *)&ax, sizeof(int16_t));
-  log_file.write((byte *)&ay, sizeof(int16_t));
-  log_file.write((byte *)&az, sizeof(int16_t));
-  log_file.write((byte *)&gx, sizeof(int16_t));
-  log_file.write((byte *)&gy, sizeof(int16_t));
-  log_file.write((byte *)&gz, sizeof(int16_t));
+  log_file.write((byte *)&ax, sizeof(float));
+  log_file.write((byte *)&ay, sizeof(float));
+  log_file.write((byte *)&az, sizeof(float));
+  log_file.write((byte *)&gx, sizeof(float));
+  log_file.write((byte *)&gy, sizeof(float));
+  log_file.write((byte *)&gz, sizeof(float));
 
 #else
 
