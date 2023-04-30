@@ -162,22 +162,24 @@ void motor_test()
 
 // Returns new value if signal is stable for specified debounce time: here it is 100ms.
 bool debounce(bool value, bool& last_value, unsigned long& stable_time) {
-  static const unsigned long DEBOUNCE_TIME = 100; // ms
+  static const unsigned long DEBOUNCE_TIME = 250; // ms
+  static bool valueState = false;
 
   // Check if the value has changed
   if (value != last_value) {
     // If the value has changed, reset the stable_since time
     stable_time = millis();
-  } else if (millis() - stable_time >= DEBOUNCE_TIME) {
+  }
+  if ((millis() - stable_time) >= DEBOUNCE_TIME) {
     // If the value has been stable for 100ms, return the new value
-    if (value != last_value) {
-      last_value = value;
-      return value;
+    if (value != valueState) {
+      valueState = value;
     }
   }
 
+  last_value = value;
   // If the value hasn't been stable for 100ms, return the old value
-  return last_value;
+  return valueState;
 }
 
 
@@ -219,6 +221,7 @@ void begin_experiment()
   //Begin interrupt to disable the motors.
   pump_millis = millis();
   armState = 2;
+  playNote(440, 200);
 }
 //Experiment is now finished, note this in the SD card log, turn off LEDs 1 and 2, disable pump. Cameras will turn off by themselves. Close SD card file
 void finalise_and_close()
@@ -503,10 +506,7 @@ void loop()
 
     static bool pumpActivated = false;
 
-    // Handle debounced value
-    if (isSecondActivation(debounced_value))
-    {
-      // TODO: Clean this up.
+    if (isSecondActivation(debounced_value)) {
       if (!pumpStartSet)
       {
         pumpRunStartTime = millis(); // Sets start time
@@ -514,32 +514,45 @@ void loop()
         begin_experiment();
         // TODO: Maybe update from millis() as using millis() for all time features is probably not great practice?
       }
-
-      // ACTIVATE PUMP FOR REAL!
-
-      pumpActivated = true; // Set the pumpActivated flag. This is for the backup pump logic.
-
-      // TODO: ADD MOTOR CONTROL FUNCTION CALL HERE.
-      // Maybe just set variable to true. Then at bottom below backup logic depending on variable value can call pump activation function. Therefore avoids some issues with the backup logic.
-
-      // TODO: Do we want to block it from shutting off from here after <x seconds? I.e. if returns false after 20seconds do we ovveride here or in backup?
     }
+
+    // Handle debounced value
+    // if (isSecondActivation(debounced_value))
+    // {
+    //   // TODO: Clean this up.
+    //   if (!pumpStartSet)
+    //   {
+    //     pumpRunStartTime = millis(); // Sets start time
+    //     pumpStartSet = true;
+    //     begin_experiment();
+    //     // TODO: Maybe update from millis() as using millis() for all time features is probably not great practice?
+    //   }
+
+    //   // ACTIVATE PUMP FOR REAL!
+
+    //   pumpActivated = true; // Set the pumpActivated flag. This is for the backup pump logic.
+
+    //   // TODO: ADD MOTOR CONTROL FUNCTION CALL HERE.
+    //   // Maybe just set variable to true. Then at bottom below backup logic depending on variable value can call pump activation function. Therefore avoids some issues with the backup logic.
+
+    //   // TODO: Do we want to block it from shutting off from here after <x seconds? I.e. if returns false after 20seconds do we ovveride here or in backup?
+    // }
 
     // ----------- BACKUP PUMP ACTIVATION LOGIC --------------
     // TODO: Update as currently this will mess with above logic and may switch values very quickly?
     // If pump hasn't activated by start_time, activate it regardless of acceleration threshold
-    if (currentMillis - activeStartTime >= start_time * 1000 && !pumpActivated)
-    {
-      Serial.println("Backup Pump Activation Activated");
-      if (!pumpStartSet)
-      {
-        pumpRunStartTime = millis(); // Sets start time
-        pumpStartSet = true;
-        begin_experiment();
-      }
+    // if (currentMillis - activeStartTime >= start_time * 1000 && !pumpActivated)
+    // {
+    //   Serial.println("Backup Pump Activation Activated");
+    //   if (!pumpStartSet)
+    //   {
+    //     pumpRunStartTime = millis(); // Sets start time
+    //     pumpStartSet = true;
+    //     begin_experiment();
+    //   }
 
-      // pumpActiveBool = true;
-    }
+    //   // pumpActiveBool = true;
+    // }
 
     // Activate the pump if the flag is set
     // If its past the start time and the pump hasn't been activated before. Backup time!
