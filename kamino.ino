@@ -356,7 +356,6 @@ void setup()
 
 
   //Initialize LEDs and turn on
-
   pinMode(LED_PIN_1, OUTPUT);
   pinMode(LED_PIN_2, OUTPUT);
   pinMode(LED_PIN_3, OUTPUT);
@@ -374,7 +373,6 @@ void setup()
   //timerAttachInterrupt(My_timer, &onTimer, true);
   //timerAlarmWrite(My_timer, experiment_length, true);
   enter_arming();
-
 }
 //Enter arming: This is the first mode, prior to being launched. When in this mode, LED 1 will be on, cameras are not recording, and it is awaiting launch detection
 //Add a flag to the SD card indicating the current state
@@ -390,24 +388,10 @@ void loop()
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
   //print_MPU6050_data(ax, ay, az, gx, gy, gz);
 
-  // Convert accelerometer readings to m/s^2
-  // float ax_mps2 = ax * 9.80665 / 16384.0; // Convert accelerometer values to m/s^2
-  // float ay_mps2 = ay * 9.80665 / 16384.0;
-  // float az_mps2 = az * 9.80665 / 16384.0;
-
   // BME280 Sensor Data
   float bme_temp = bme.readTemperature(); // Read temperature in Celsius
   float bme_hum = bme.readHumidity(); // Read humidity in %
   float bme_press = bme.readPressure() / 100.0F; // Read pressure in hPa
-
-  Serial.print("Temperature: ");
-  Serial.print(bme_temp);
-  Serial.print(" °C, Humidity: ");
-  Serial.print(bme_hum);
-  Serial.print(" %, Pressure: ");
-  Serial.print(bme_press);
-  Serial.println(" hPa");
-  //Serial.println(mpu.getAccelerationY() * 9.80665 / 16384.0);
 
   // SD Card Logging
   // TODO: Clean up this code
@@ -458,9 +442,23 @@ void loop()
     accelArmActivated = true;
   }
 
-  // Log sensor data to SD card
-  print_MPU6050_data(ax/2048, ay/2048, az/2048, gx, gy, gz);
-  print_BME280_data(bme_temp, bme_press, bme_hum);
+  // Log sensor data to SD card - Log data slower when not launched
+  static unsigned long previousMillis = 0;
+  static const unsigned logInterval = 5000; // ms
+  if (AccelArmState) { // Not launched
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousMillis >= logInterval) {
+      // Log at slower rate
+      print_MPU6050_data(ax/2048, ay/2048, az/2048, gx, gy, gz);
+      print_BME280_data(bme_temp, bme_press, bme_hum);
+      previousMillis = currentMillis;
+    }
+  } else { // Launched
+    // Log every time
+    print_MPU6050_data(ax/2048, ay/2048, az/2048, gx, gy, gz);
+    print_BME280_data(bme_temp, bme_press, bme_hum);
+  }
+
   //log current arming state
   log_file.println(armState);
 
