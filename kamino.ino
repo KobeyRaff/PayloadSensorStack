@@ -539,18 +539,18 @@ void loop()
     // ----------- BACKUP PUMP ACTIVATION LOGIC --------------
     // TODO: Update as currently this will mess with above logic and may switch values very quickly?
     // If pump hasn't activated by start_time, activate it regardless of acceleration threshold
-    // if (currentMillis - activeStartTime >= start_time * 1000 && !pumpActivated)
-    // {
-    //   Serial.println("Backup Pump Activation Activated");
-    //   if (!pumpStartSet)
-    //   {
-    //     pumpRunStartTime = millis(); // Sets start time
-    //     pumpStartSet = true;
-    //     begin_experiment();
-    //   }
+    if (currentMillis - activeStartTime >= start_time * 1000 && !pumpActivated)
+    {
+      Serial.println("Backup Pump Activation Activated");
+      if (!pumpStartSet)
+      {
+        pumpRunStartTime = millis(); // Sets start time
+        pumpStartSet = true;
+        begin_experiment();
+      }
 
-    //   // pumpActiveBool = true;
-    // }
+      // pumpActiveBool = true;
+    }
 
     // Activate the pump if the flag is set
     // If its past the start time and the pump hasn't been activated before. Backup time!
