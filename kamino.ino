@@ -20,7 +20,7 @@ Adafruit_BME280 bme;
 
 
 const int freq = 1000;      // set the PWM frequency to 1khz
-const int motorChannel = 0;   // set the PWM channel
+const int motorChannel = 1;   // set the PWM channel
 const int resolution = 8;   // set PWM resolution
 
 const int buzzerChannel = 8;
@@ -31,7 +31,7 @@ inline void check_threshold(
     float bme_press,
     float bme_hum);
 
-uint16_t ArmAccel = 2000;  // TODO : UPDATE! Arming acceleration, ideally, speed off the rail (Upon arm allows cameras to start recording, data logging, pump activation logic runs. etc.)
+uint16_t ArmAccel = 3000;  // TODO : UPDATE! Arming acceleration, ideally, speed off the rail (Upon arm allows cameras to start recording, data logging, pump activation logic runs. etc.)
 bool AccelArmState = true; // True = not active, false = active experiment
 uint16_t armState = 0;
 bool accelArmActivated = false;   // Set acceleration armed to inactive. This is the arming state of the pump activation cycle.
@@ -39,27 +39,23 @@ bool accelArmActivated = false;   // Set acceleration armed to inactive. This is
 // MPU6050
 int accelgyro_init_ok = 0;
 inline void print_MPU6050_data(
-    float ax,
-    float ay,
-    float az,
-    float gx,
-    float gy,
-    float gz);
+    int16_t ax,
+    int16_t ay,
+    int16_t az,
+    int16_t gx,
+    int16_t gy,
+    int16_t gz);
 
 MPU6050 mpu; // Create mpu6050 object
 
 unsigned long pump_millis = 0;
 unsigned long experiment_length_s = 20*1000;
 //This is the code to disable the pumps.
-void IRAM_ATTR onTimer(){
-  ledcWrite(motorChannel, 0);
-  finalise_and_close();
-}
 
 // SD CARD and file logging
 uint8_t SD_CS_PIN = 29;
 #define SD_SAVE_INTERVAL 5000ul // ms
-String log_file_dir = "/";
+String log_file_dir = "null";
 String log_file_name = "Malyrie_Test";
 int log_file_number = 0;
 String log_file_extension = ".txt";
@@ -75,7 +71,7 @@ int clear_SD_files();
 float THRESHOLD_G = 0.7;
 
 // Hard Coded Activation Values
-int start_time = 30; // Sims say 27 seconds from launch. TODO: Make more tolerant?
+int start_time = 15; // Sims say 27 seconds from launch. TODO: Make more tolerant?
 int end_time = 100;  // Sims say 100 seconds from launch
 
 // exponential smoothing filter for acceleration values from MPU6050
@@ -112,15 +108,15 @@ void led_test()
 {
 
   digitalWrite(LED_PIN_1, HIGH);
-  delay(500);
+  delay(200);
   digitalWrite(LED_PIN_2, HIGH);
-  delay(500);
+  delay(200);
   digitalWrite(LED_PIN_1, LOW);
-  delay(500);
+  delay(200);
   digitalWrite(LED_PIN_3, HIGH);
-  delay(500);
+  delay(200);
   digitalWrite(LED_PIN_2, LOW);
-  delay(500);
+  delay(200);
   digitalWrite(LED_PIN_3, LOW);
 }
 void playNote(int frequency, int duration) {
@@ -205,6 +201,7 @@ void enter_arming()
 void begin_armed()
 {
   digitalWrite(LED_PIN_2, HIGH);
+  digitalWrite(CAMERA_CONTROL_PIN, HIGH);
   armState = 1;
   playNote(440, 500);
 
@@ -328,10 +325,11 @@ void setup()
     Serial.println("Will write to " + get_log_file_path());
   }
   delay(1000);
+  Serial.println("Beginning motor initialization");
 
   // Initialize PWM controller on motor pins
-  ledcAttachPin(MOTOR_CONTROL_PIN, motorChannel);
   ledcSetup(motorChannel, freq, resolution);  // define the PWM Setup
+  ledcAttachPin(MOTOR_CONTROL_PIN, motorChannel);
   motor_test();
   
   // Initialize buzzer PWM controller
@@ -433,7 +431,7 @@ void loop()
   // Off the Rod Arming
   // If average accel is greater than arm accel. Arm and start logging stuff:
 
-  int16_t avg = ((ax + ay + az)) / 3; //=(((ax^2+ay^2+az^2)^(1/2))/16)/3
+  int16_t avg = (abs(ax + ay + az)) / 3; //=(((ax^2+ay^2+az^2)^(1/2))/16)/3
   if (avg > ArmAccel && !accelArmActivated) // If hasn't been armed before i.e. not launched off rod. 
   {
     AccelArmState = false; // Active now
@@ -451,16 +449,17 @@ void loop()
       // Log at slower rate
       print_MPU6050_data((float)ax/2048, (float)ay/2048, (float)az/2048, (float)gx, (float)gy, (float)gz);
       print_BME280_data(bme_temp, bme_press, bme_hum);
+      log_file.println(armState);
       previousMillis = currentMillis;
     }
   } else { // Launched
     // Log every time
     print_MPU6050_data((float)ax/2048, (float)ay/2048, (float)az/2048, (float)gx, (float)gy, (float)gz);
     print_BME280_data(bme_temp, bme_press, bme_hum);
+    log_file.println(armState);
   }
 
   //log current arming state
-  log_file.println(armState);
 
   // ------------------------------- ACTIVE FLIGHT PERIOD (CAMERA + ACTIVATiON LOGIC) -------------------------------
   if (AccelArmState == false)
@@ -598,7 +597,23 @@ void loop()
 // ------------------------------- FUNCTIONS -------------------------------
 inline String get_log_file_path()
 {
-  return log_file_dir + log_file_name + String(log_file_number) + log_file_extension;
+
+  //Iterate through directories, check if session_0, session_1, session_2 exists
+  if(log_file_dir == "null") {
+    for(int i = 0; i < 100; i++)
+    {
+      if(!SD.exists("/session_" + String(i)))
+      {
+        SD.mkdir("/session_" + String(i));
+        log_file_dir = "/session_" + String(i); 
+        break;
+      }
+    }
+  }
+  return log_file_dir + "/" + log_file_name + String(log_file_number) + log_file_extension;
+
+
+
 }
 
 // TODO: Clean up both these logging functions.
@@ -620,23 +635,28 @@ inline void print_MPU6050_data(
 
   Serial.print("\r\nAG");
   Serial.write((byte *)&timestamp, sizeof(uint32_t));
-  Serial.write((byte *)&ax, sizeof(float));
-  Serial.write((byte *)&ay, sizeof(float));
-  Serial.write((byte *)&az, sizeof(float));
-  Serial.write((byte *)&gx, sizeof(float));
-  Serial.write((byte *)&gy, sizeof(float));
-  Serial.write((byte *)&gz, sizeof(float));
+  Serial.write((byte *)&ax, sizeof(int16_t));
+  Serial.write((byte *)&ay, sizeof(int16_t));
+  Serial.write((byte *)&az, sizeof(int16_t));
+  Serial.write((byte *)&gx, sizeof(int16_t));
+  Serial.write((byte *)&gy, sizeof(int16_t));
+  Serial.write((byte *)&gz, sizeof(int16_t));
 
 #endif
 
-  log_file.print("\r\nAG");
-  log_file.write((byte *)&timestamp, sizeof(uint32_t));
-  log_file.write((byte *)&ax, sizeof(float));
-  log_file.write((byte *)&ay, sizeof(float));
-  log_file.write((byte *)&az, sizeof(float));
-  log_file.write((byte *)&gx, sizeof(float));
-  log_file.write((byte *)&gy, sizeof(float));
-  log_file.write((byte *)&gz, sizeof(float));
+  log_file.print(timestamp);
+  log_file.print(", a/g, ");
+  log_file.print(ax);
+  log_file.print(", ");
+  log_file.print(ay);
+  log_file.print(", ");
+  log_file.print(az);
+  log_file.print(", ");
+  log_file.print(gx);
+  log_file.print(", ");
+  log_file.print(gy);
+  log_file.print(", ");
+  log_file.println(gz);
 
 #else
 
